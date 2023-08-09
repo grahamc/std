@@ -2,6 +2,7 @@
   trivial,
   root,
   super,
+  dmerge,
 }:
 /*
 Use the `kubectl` Blocktype for rendering deployment manifests
@@ -40,12 +41,47 @@ in
         Otherwise we cannot keep good track of deployment history.''
       inputs.self.rev;
 
-      augment = target:
-        lib.mapAttrs (_: v: (
-          if v ? metadata && v.metadata ? labels
-          then lib.recursiveUpdate v {metadata.labels.revision = checkedRev;}
-          else v
-        )) (builtins.removeAttrs target ["meta"]);
+      augment = let
+        amendIfExists = path: rhs: manifest:
+          if true == lib.hasAttrByPath path manifest
+          then dmerge manifest rhs
+          else manifest;
+        amendAlways = path: func: manifest:
+        dmerge.chainMerge (dmerge.chainable manifest);
+        # meta settings
+        namespace = lib.attrByPath ["meta" "namespace"] null target;
+      in
+        target:
+          lib.mapAttrs (_:
+            lib.flip lib.pipe [
+              # metadata
+              (
+                amendIfExists ["metadata"]
+                (dmerge.chainable (lib.optionalAttrs null != namespace {
+                  metadata = {inherit namespace;}
+                }))
+                {
+                  metadata.labels."app.kubernetes.io/version" = checkedRev;
+                  metadata.labels."app.kubernetes.io/managed-by" = "std-kubectl";
+                }
+              )
+              # sepc/service/namespace
+              # https://github.com/kubernetes-sigs/kustomize/blob/master/api/konfig/builtinpluginconsts/namespace.go
+              (
+                amendIfExists ["kind" "APIService"]
+                (lib.optionalAttrs null != namespace {
+                  spec.service = {inherit namespace;};
+                })
+              )
+              # spec/conversion/webhook/clientConfig/service/namespace
+              # https://github.com/kubernetes-sigs/kustomize/blob/master/api/konfig/builtinpluginconsts/namespace.go
+              (
+                amendIfExists ["spec" "conversion" "webhook" "clientConfig" "service" "namespace"]
+                (lib.optionalAttrs null != namespace {
+                  spec.conversion.webhook.clientConfig.service= {inherit namespace;};
+                })
+              )
+            ]) (builtins.removeAttrs target ["meta"]);
 
       # add git revision under metadata.labels.revision, if present
       manifestsWithGitRevision = target: let
